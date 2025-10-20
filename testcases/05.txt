@@ -1,0 +1,6 @@
+pos=0.7725 -0.385 1.3065
+tarpos=0.782 -0.178 0.312
+width=4096
+height=4096
+timelimit=45
+valid=/work/b10502010/pp25/hw3/testcases/05.png
