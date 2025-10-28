@@ -4,7 +4,7 @@
 #include <cuda_runtime.h>
 
 // GLM vector math library
-#define GLM_COMPILER 0
+// #define GLM_COMPILER 0
 #define GLM_FORCE_CUDA
 #define CUDA_VERSION 12800 // CUDA 12.8
 #include <glm/glm.hpp>
@@ -176,11 +176,28 @@ __device__ float trace(vec3 ro, vec3 rd, float &trap, int &ID)
 }
 
 // Render kernel - ray marching for each pixel
-__global__ void renderKernel(unsigned char *raw_image, unsigned char **image, int width, int height)
+__launch_bounds__(256, 6)
+    __global__ void renderKernel(unsigned char *raw_image, /*unsigned char **image ,*/ int width, int height)
 {
     // Calculate 2D coordinates
     int j = blockIdx.x * blockDim.x + threadIdx.x; // x (column)
     int i = blockIdx.y * blockDim.y + threadIdx.y; // y (row)
+
+    // __shared__ vec3 cf;
+    // __shared__ vec3 cs;
+    // __shared__ vec3 cu;
+    // vec3 ro = d_camera_pos; // ray (camera) origin
+
+    // if (threadIdx.x == 0 && threadIdx.y == 0)
+    // {
+    //     //---create camera
+    //     vec3 ta = d_target_pos;       // target position
+    //     cf = glm::normalize(ta - ro); // forward vector
+    //     cs =
+    //         glm::normalize(glm::cross(cf, vec3(0.f, 1.f, 0.f))); // right (side) vector
+    //     cu = glm::normalize(glm::cross(cs, cf));                 // up vector
+    // }
+    // __syncthreads();
 
     // Boundary check
     if (i >= height || j >= width)
@@ -204,7 +221,7 @@ __global__ void renderKernel(unsigned char *raw_image, unsigned char **image, in
             uv.y *= -1.f; // flip upside down
             //---
 
-            //---create camera
+            // //---create camera
             vec3 ro = d_camera_pos;            // ray (camera) origin
             vec3 ta = d_target_pos;            // target position
             vec3 cf = glm::normalize(ta - ro); // forward vector
@@ -284,10 +301,15 @@ __global__ void renderKernel(unsigned char *raw_image, unsigned char **image, in
     fcol_b *= 255.0f;
 
     // Write to image
-    image[i][4 * j + 0] = (unsigned char)fcol_r; // r
-    image[i][4 * j + 1] = (unsigned char)fcol_g; // g
-    image[i][4 * j + 2] = (unsigned char)fcol_b; // b
-    image[i][4 * j + 3] = 255;                   // a
+    // image[i][4 * j + 0] = (unsigned char)fcol_r; // r
+    // image[i][4 * j + 1] = (unsigned char)fcol_g; // g
+    // image[i][4 * j + 2] = (unsigned char)fcol_b; // b
+    // image[i][4 * j + 3] = 255;                   // a
+    int idx = (i * width + j) * 4;
+    raw_image[idx + 0] = (unsigned char)fcol_r;
+    raw_image[idx + 1] = (unsigned char)fcol_g;
+    raw_image[idx + 2] = (unsigned char)fcol_b;
+    raw_image[idx + 3] = 255;
 }
 
 int main(int argc, char **argv)
@@ -348,27 +370,27 @@ int main(int argc, char **argv)
     // Step 3: Allocate host memory
     size_t image_size = width * height * 4 * sizeof(unsigned char); // RGBA
     h_raw_image = (unsigned char *)malloc(image_size);
-    h_image_ptr = (unsigned char **)malloc(height * sizeof(unsigned char *));
+    // h_image_ptr = (unsigned char **)malloc(height * sizeof(unsigned char *));
 
-    for (int i = 0; i < height; i++)
-    {
-        h_image_ptr[i] = h_raw_image + i * width * 4;
-    }
+    // for (int i = 0; i < height; i++)
+    // {
+    //     h_image_ptr[i] = h_raw_image + i * width * 4;
+    // }
 
     // Step 4: Allocate device memory
     unsigned char *d_raw_image;
-    unsigned char **d_image_ptr;
+    // unsigned char **d_image_ptr;
     cudaMalloc(&d_raw_image, image_size);
-    cudaMalloc(&d_image_ptr, height * sizeof(unsigned char *));
+    // cudaMalloc(&d_image_ptr, height * sizeof(unsigned char *));
 
     // Copy row pointers to device (this is tricky, need to update pointers)
-    unsigned char **h_temp_ptr = (unsigned char **)malloc(height * sizeof(unsigned char *));
-    for (int i = 0; i < height; i++)
-    {
-        h_temp_ptr[i] = d_raw_image + i * width * 4; // Device pointers
-    }
-    cudaMemcpy(d_image_ptr, h_temp_ptr, height * sizeof(unsigned char *), cudaMemcpyHostToDevice);
-    free(h_temp_ptr);
+    // unsigned char **h_temp_ptr = (unsigned char **)malloc(height * sizeof(unsigned char *));
+    // for (int i = 0; i < height; i++)
+    // {
+    //     h_temp_ptr[i] = d_raw_image + i * width * 4; // Device pointers
+    // }
+    // cudaMemcpy(d_image_ptr, h_temp_ptr, height * sizeof(unsigned char *), cudaMemcpyHostToDevice);
+    // free(h_temp_ptr);
 
     // Step 5: Configure 2D grid and block dimensions
     dim3 blockSize(16, 16); // 256 threads per block
@@ -386,7 +408,7 @@ int main(int argc, char **argv)
 
     // Step 6: Launch kernel
     cudaEventRecord(start_kernel);
-    renderKernel<<<gridSize, blockSize>>>(d_raw_image, d_image_ptr, width, height);
+    renderKernel<<<gridSize, blockSize>>>(d_raw_image, /*d_image_ptr,*/ width, height);
     cudaEventRecord(stop_kernel);
 
     // Synchronize and check for errors
@@ -417,9 +439,9 @@ int main(int argc, char **argv)
 
     // Step 9: Free memory
     free(h_raw_image);
-    free(h_image_ptr);
+    // free(h_image_ptr);
     cudaFree(d_raw_image);
-    cudaFree(d_image_ptr);
+    // cudaFree(d_image_ptr);
 
     // Clean up events
     cudaEventDestroy(start_kernel);
