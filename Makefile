@@ -11,7 +11,7 @@ GLM_DIR = /work/b10502010/pp25/hw3/glm
 # Compiler flags
 CPPFLAGS = -I$(LODEPNG_DIR) -I$(GLM_DIR)/include
 CXXFLAGS = -std=c++17 -O3
-NVCCFLAGS = -std=c++17 -O3 -arch=sm_70 -Xptxas=-v
+NVCCFLAGS = -std=c++17 -O3 -arch=sm_70 -Xptxas=-v --use_fast_math
 
 # Source files
 LODEPNG = $(LODEPNG_DIR)/lodepng.cpp

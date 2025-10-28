@@ -66,21 +66,29 @@ __device__ float md(vec3 p, float &trap)
     float r = glm::length(v); // r = |v| = sqrt(x^2 + y^2 + z^2)
     trap = r;
 
+    // Precompute power - 1 (used in every iteration)
+    const float power_minus_1 = d_power - 1.f;
+    const float half_log_bailout = 0.5f * logf(d_bailout); // Early exit optimization
+
     for (int i = 0; i < d_md_iter; ++i)
     {
+        // Early exit if we're far enough
+        if (r > d_bailout)
+            break;
+
         float theta = glm::atan(v.y, v.x) * d_power;
         float phi = glm::asin(v.z / r) * d_power;
 
         // Use FMA: dr = d_power * pow(r, d_power-1) * dr + 1
-        float r_pow = glm::pow(r, d_power - 1.f);
+        float r_pow = glm::pow(r, power_minus_1);
         dr = fmaf(d_power * r_pow, dr, 1.f);
 
         // Calculate powered radius
         float r_power = r * r_pow; // r^d_power = r * r^(d_power-1)
-        float cos_theta = cos(theta);
-        float sin_theta = sin(theta);
-        float cos_phi = cos(phi);
-        float sin_phi = sin(phi);
+        float cos_theta = cosf(theta);
+        float sin_theta = sinf(theta);
+        float cos_phi = cosf(phi);
+        float sin_phi = sinf(phi);
 
         // Use FMA for vector update: v = p + r_power * vec3(...)
         v.x = fmaf(r_power, cos_theta * cos_phi, p.x);
@@ -91,10 +99,8 @@ __device__ float md(vec3 p, float &trap)
         trap = glm::min(trap, r);
 
         r = glm::length(v); // update r
-        if (r > d_bailout)
-            break; // if escaped
     }
-    return 0.5f * log(r) * r / dr; // mandelbulb's DE function
+    return 0.5f * logf(r) * r / dr; // mandelbulb's DE function
 }
 
 // scene mapping
@@ -176,28 +182,37 @@ __device__ float trace(vec3 ro, vec3 rd, float &trap, int &ID)
 }
 
 // Render kernel - ray marching for each pixel
-__launch_bounds__(256, 6)
+__launch_bounds__(256, 6) // Configured for 256 threads per block
     __global__ void renderKernel(unsigned char *raw_image, /*unsigned char **image ,*/ int width, int height)
 {
     // Calculate 2D coordinates
     int j = blockIdx.x * blockDim.x + threadIdx.x; // x (column)
     int i = blockIdx.y * blockDim.y + threadIdx.y; // y (row)
 
-    // __shared__ vec3 cf;
-    // __shared__ vec3 cs;
-    // __shared__ vec3 cu;
-    // vec3 ro = d_camera_pos; // ray (camera) origin
+    // Shared memory for camera vectors (computed once per block)
+    __shared__ vec3 cf;
+    __shared__ vec3 cs;
+    __shared__ vec3 cu;
+    __shared__ vec3 ro;
+    __shared__ vec3 sd;      // sun direction (lighting)
+    __shared__ vec3 sc;      // light color
+    __shared__ float inv_AA; // 1.0 / d_AA
 
-    // if (threadIdx.x == 0 && threadIdx.y == 0)
-    // {
-    //     //---create camera
-    //     vec3 ta = d_target_pos;       // target position
-    //     cf = glm::normalize(ta - ro); // forward vector
-    //     cs =
-    //         glm::normalize(glm::cross(cf, vec3(0.f, 1.f, 0.f))); // right (side) vector
-    //     cu = glm::normalize(glm::cross(cs, cf));                 // up vector
-    // }
-    // __syncthreads();
+    // First thread in block computes camera vectors
+    if (threadIdx.x == 0 && threadIdx.y == 0)
+    {
+        ro = d_camera_pos;                                        // ray (camera) origin
+        vec3 ta = d_target_pos;                                   // target position
+        cf = glm::normalize(ta - ro);                             // forward vector
+        cs = glm::normalize(glm::cross(cf, vec3(0.f, 1.f, 0.f))); // right (side) vector
+        cu = glm::normalize(glm::cross(cs, cf));                  // up vector
+
+        // Pre-compute lighting constants
+        sd = glm::normalize(d_camera_pos); // sun direction
+        sc = vec3(1.f, .9f, .717f);        // light color
+        inv_AA = 1.0f / (float)d_AA;       // inverse AA for optimization
+    }
+    __syncthreads();
 
     // Boundary check
     if (i >= height || j >= width)
@@ -213,7 +228,7 @@ __launch_bounds__(256, 6)
     {
         for (int n = 0; n < d_AA; n++)
         {
-            vec2 p = vec2(j, i) + vec2(m, n) / (float)d_AA;
+            vec2 p = vec2(j, i) + vec2(m, n) * inv_AA; // Use pre-computed inverse
 
             //---convert screen space coordinate to (-ap~ap, -1~1)
             // ap = aspect ratio = width/height
@@ -221,13 +236,7 @@ __launch_bounds__(256, 6)
             uv.y *= -1.f; // flip upside down
             //---
 
-            // //---create camera
-            vec3 ro = d_camera_pos;            // ray (camera) origin
-            vec3 ta = d_target_pos;            // target position
-            vec3 cf = glm::normalize(ta - ro); // forward vector
-            vec3 cs =
-                glm::normalize(glm::cross(cf, vec3(0.f, 1.f, 0.f)));      // right (side) vector
-            vec3 cu = glm::normalize(glm::cross(cs, cf));                 // up vector
+            // Use shared memory camera vectors
             vec3 rd = glm::normalize(uv.x * cs + uv.y * cu + d_FOV * cf); // ray direction
             //---
 
@@ -237,10 +246,8 @@ __launch_bounds__(256, 6)
             float d = trace(ro, rd, trap, objID);
             //---
 
-            //---lighting
-            vec3 col(0.f);                          // color
-            vec3 sd = glm::normalize(d_camera_pos); // sun direction (directional light)
-            vec3 sc = vec3(1.f, .9f, .717f);        // light color
+            //---lighting - using shared memory constants
+            vec3 col(0.f); // color
             //---
 
             //---coloring
@@ -252,10 +259,7 @@ __launch_bounds__(256, 6)
             {
                 vec3 pos = ro + rd * d;             // hit position
                 vec3 nr = calcNor(pos);             // get surface normal
-                vec3 hal = glm::normalize(sd - rd); // blinn-phong lighting model (vector
-                                                    // h)
-                // for more info:
-                // https://en.wikipedia.org/wiki/Blinn%E2%80%93Phong_shading_model
+                vec3 hal = glm::normalize(sd - rd); // blinn-phong lighting model (vector h)
 
                 // use orbit trap to get the color
                 col = pal(trap - .4f, vec3(.5f), vec3(.5f), vec3(1.f),
@@ -263,14 +267,17 @@ __launch_bounds__(256, 6)
                 vec3 ambc = vec3(0.3f);         // ambient color
                 float gloss = 32.f;             // specular gloss
 
+                // Pre-compute dot products
+                float sd_nr = glm::dot(sd, nr);
+                float nr_hal = glm::dot(nr, hal);
+
                 // simple blinn phong lighting model
                 float amb =
                     (0.7f + 0.3f * nr.y) *
-                    (0.2f + 0.8f * glm::clamp(0.05f * log(trap), 0.0f, 1.0f)); // self occlution
-                float sdw = softshadow(pos + .001f * nr, sd, 16.f);            // shadow
-                float dif = glm::clamp(glm::dot(sd, nr), 0.f, 1.f) * sdw;      // diffuse
-                float spe = glm::pow(glm::clamp(glm::dot(nr, hal), 0.f, 1.f), gloss) *
-                            dif; // self shadow
+                    (0.2f + 0.8f * glm::clamp(0.05f * logf(trap), 0.0f, 1.0f)); // self occlution
+                float sdw = softshadow(pos + .001f * nr, sd, 16.f);             // shadow
+                float dif = glm::clamp(sd_nr, 0.f, 1.f) * sdw;                  // diffuse
+                float spe = powf(glm::clamp(nr_hal, 0.f, 1.f), gloss) * dif;    // self shadow
 
                 vec3 lin(0.f);
                 lin += ambc * (.05f + .95f * amb); // ambient color * ambient
@@ -393,7 +400,7 @@ int main(int argc, char **argv)
     // free(h_temp_ptr);
 
     // Step 5: Configure 2D grid and block dimensions
-    dim3 blockSize(16, 16); // 256 threads per block
+    dim3 blockSize(8, 16); // 256 threads per block
     dim3 gridSize(
         (width + blockSize.x - 1) / blockSize.x,
         (height + blockSize.y - 1) / blockSize.y);
