@@ -223,9 +223,11 @@ __launch_bounds__(256, 6) // Configured for 256 threads per block
     float fcol_g = 0.0f;
     float fcol_b = 0.0f;
 
-    // Anti-aliasing loop
+// Anti-aliasing loop - manually unrolled (3x3 = 9 iterations)
+#pragma unroll
     for (int m = 0; m < d_AA; m++)
     {
+#pragma unroll
         for (int n = 0; n < d_AA; n++)
         {
             vec2 p = vec2(j, i) + vec2(m, n) * inv_AA; // Use pre-computed inverse
@@ -246,14 +248,11 @@ __launch_bounds__(256, 6) // Configured for 256 threads per block
             float d = trace(ro, rd, trap, objID);
             //---
 
-            //---lighting - using shared memory constants
-            vec3 col(0.f); // color
-            //---
-
             //---coloring
             if (d < 0.f)
-            {                    // miss (hit sky)
-                col = vec3(0.f); // sky color (black)
+            { // miss (hit sky)
+              // Sky color (black) - directly add to accumulator
+              // No need to create vec3 col
             }
             else
             {
@@ -261,15 +260,13 @@ __launch_bounds__(256, 6) // Configured for 256 threads per block
                 vec3 nr = calcNor(pos);             // get surface normal
                 vec3 hal = glm::normalize(sd - rd); // blinn-phong lighting model (vector h)
 
-                // use orbit trap to get the color
-                col = pal(trap - .4f, vec3(.5f), vec3(.5f), vec3(1.f),
-                          vec3(.0f, .1f, .2f)); // diffuse color
-                vec3 ambc = vec3(0.3f);         // ambient color
-                float gloss = 32.f;             // specular gloss
-
                 // Pre-compute dot products
                 float sd_nr = glm::dot(sd, nr);
                 float nr_hal = glm::dot(nr, hal);
+
+                // use orbit trap to get the color
+                vec3 col = pal(trap - .4f, vec3(.5f), vec3(.5f), vec3(1.f),
+                               vec3(.0f, .1f, .2f)); // diffuse color
 
                 // simple blinn phong lighting model
                 float amb =
@@ -277,23 +274,22 @@ __launch_bounds__(256, 6) // Configured for 256 threads per block
                     (0.2f + 0.8f * glm::clamp(0.05f * logf(trap), 0.0f, 1.0f)); // self occlution
                 float sdw = softshadow(pos + .001f * nr, sd, 16.f);             // shadow
                 float dif = glm::clamp(sd_nr, 0.f, 1.f) * sdw;                  // diffuse
-                float spe = powf(glm::clamp(nr_hal, 0.f, 1.f), gloss) * dif;    // self shadow
+                float spe = powf(glm::clamp(nr_hal, 0.f, 1.f), 32.f) * dif;     // self shadow
 
-                vec3 lin(0.f);
-                lin += ambc * (.05f + .95f * amb); // ambient color * ambient
-                lin += sc * dif * 0.8f;            // diffuse * light color * light intensity
-                col *= lin;
+                // Apply lighting (reduce vec3 usage)
+                vec3 ambc = vec3(0.3f);                              // ambient color
+                col *= ambc * (.05f + .95f * amb) + sc * dif * 0.8f; // combined lighting
 
                 col = glm::pow(col, vec3(.7f, .9f, 1.f)); // fake SSS (subsurface scattering)
                 col += spe * 0.8f;                        // specular
+
+                // gamma correction and accumulate
+                col = glm::clamp(glm::pow(col, vec3(.4545f)), 0.f, 1.f);
+                fcol_r += col.r;
+                fcol_g += col.g;
+                fcol_b += col.b;
             }
             //---
-
-            col = glm::clamp(glm::pow(col, vec3(.4545f)), 0.f, 1.f); // gamma correction
-            // fcol += vec4(col, 1.);
-            fcol_r += col.r;
-            fcol_g += col.g;
-            fcol_b += col.b;
         }
     }
 
