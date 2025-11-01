@@ -182,7 +182,7 @@ __device__ float trace(vec3 ro, vec3 rd, float &trap, int &ID)
 }
 
 // Render kernel - ray marching for each pixel
-__launch_bounds__(256, 6) // Configured for 256 threads per block
+__launch_bounds__(128, 6) // Configured for 128 threads per block
     __global__ void renderKernel(unsigned char *raw_image, /*unsigned char **image ,*/ int width, int height)
 {
     // Calculate 2D coordinates
@@ -303,26 +303,18 @@ __launch_bounds__(256, 6) // Configured for 256 threads per block
     fcol_g *= 255.0f;
     fcol_b *= 255.0f;
 
-    // Write to image
-    // image[i][4 * j + 0] = (unsigned char)fcol_r; // r
-    // image[i][4 * j + 1] = (unsigned char)fcol_g; // g
-    // image[i][4 * j + 2] = (unsigned char)fcol_b; // b
-    // image[i][4 * j + 3] = 255;                   // a
-    int idx = (i * width + j) * 4;
-    raw_image[idx + 0] = (unsigned char)fcol_r;
-    raw_image[idx + 1] = (unsigned char)fcol_g;
-    raw_image[idx + 2] = (unsigned char)fcol_b;
-    raw_image[idx + 3] = 255;
+    // Write to image - Coalesced memory write (32-bit aligned)
+    int pixel_idx = i * width + j;
+    uchar4 *image_ptr = (uchar4 *)raw_image;
+    image_ptr[pixel_idx] = make_uchar4(
+        (unsigned char)fcol_r,
+        (unsigned char)fcol_g,
+        (unsigned char)fcol_b,
+        255);
 }
 
 int main(int argc, char **argv)
 {
-    // Start timing
-    cudaEvent_t start_total, stop_total;
-    cudaEventCreate(&start_total);
-    cudaEventCreate(&stop_total);
-    cudaEventRecord(start_total);
-
     // Step 1: Check argument count
     if (argc != 10)
     {
@@ -401,18 +393,11 @@ int main(int argc, char **argv)
         (width + blockSize.x - 1) / blockSize.x,
         (height + blockSize.y - 1) / blockSize.y);
 
-    printf("Launching kernel: grid(%d, %d), block(%d, %d)\n",
-           gridSize.x, gridSize.y, blockSize.x, blockSize.y);
-
-    // Create CUDA events for kernel timing
-    cudaEvent_t start_kernel, stop_kernel;
-    cudaEventCreate(&start_kernel);
-    cudaEventCreate(&stop_kernel);
+    // printf("Launching kernel: grid(%d, %d), block(%d, %d)\n",
+    //        gridSize.x, gridSize.y, blockSize.x, blockSize.y);
 
     // Step 6: Launch kernel
-    cudaEventRecord(start_kernel);
     renderKernel<<<gridSize, blockSize>>>(d_raw_image, /*d_image_ptr,*/ width, height);
-    cudaEventRecord(stop_kernel);
 
     // Synchronize and check for errors
     cudaError_t err = cudaDeviceSynchronize();
@@ -421,11 +406,6 @@ int main(int argc, char **argv)
         printf("CUDA error: %s\n", cudaGetErrorString(err));
         return 1;
     }
-
-    // Calculate kernel execution time
-    float kernel_time_ms = 0;
-    cudaEventElapsedTime(&kernel_time_ms, start_kernel, stop_kernel);
-    printf("Kernel execution time: %.3f ms\n", kernel_time_ms);
 
     // Step 7: Copy results back to CPU
     cudaMemcpy(h_raw_image, d_raw_image, image_size, cudaMemcpyDeviceToHost);
@@ -449,19 +429,6 @@ int main(int argc, char **argv)
     // Clean up events
     cudaEventDestroy(start_kernel);
     cudaEventDestroy(stop_kernel);
-
-    // Record total time and display
-    cudaEventRecord(stop_total);
-    cudaEventSynchronize(stop_total);
-    float total_time_ms = 0;
-    cudaEventElapsedTime(&total_time_ms, start_total, stop_total);
-
-    printf("========================================\n");
-    printf("Total execution time: %.3f ms (%.3f s)\n", total_time_ms, total_time_ms / 1000.0f);
-    printf("========================================\n");
-
-    cudaEventDestroy(start_total);
-    cudaEventDestroy(stop_total);
 
     return 0;
 }
